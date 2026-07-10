@@ -1218,15 +1218,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .enabled:
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .on
-        case .notRegistered:
+        case .notRegistered, .notFound:
+            // .notFound is treated like .notRegistered here to match
+            // toggleLaunchAtLogin(), which registers on click in both states.
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .off
         case .requiresApproval:
             launchAtLoginItem.title = "Launch at Login (approval required…)"
             launchAtLoginItem.state = .mixed
-        case .notFound:
-            launchAtLoginItem.title = "Launch at Login (unavailable)"
-            launchAtLoginItem.state = .off
         @unknown default:
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .off

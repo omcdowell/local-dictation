@@ -27,8 +27,9 @@ die() { echo "error: $*" >&2; exit 1; }
 # *stable* code signature. An ad-hoc signature ("-") changes on every build, so
 # backgroundtaskmanagementd can never re-match its stored login-item record and
 # the toggle silently resets to .notFound. Resolution order:
-#   1. CODESIGN_IDENTITY set in the environment  -> honored verbatim ("-" forces
-#      ad-hoc; a "Developer ID Application: …" name works here too).
+#   1. CODESIGN_IDENTITY set to a non-empty value  -> honored verbatim ("-"
+#      forces ad-hoc; a "Developer ID Application: …" name works here too). An
+#      empty value is treated as unset and falls through to auto-detect below.
 #   2. A self-signed cert named "$SIGNING_IDENTITY_NAME" in the keychain -> sign
 #      by its SHA-1 (hash form needs no trust/policy validation to sign).
 #   3. Otherwise ad-hoc "-" with a loud warning.
@@ -38,7 +39,7 @@ BUNDLE_ID="com.omcdowell.LocalDictation"
 # requirement; env overrides (ad-hoc or Developer ID) keep codesign's default.
 APPLY_DESIGNATED_REQ=false
 
-if [[ -n "${CODESIGN_IDENTITY+x}" ]]; then
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   CODESIGN_SOURCE="environment override"
 else
   # `security find-certificate` exits 44 when the cert is absent; under

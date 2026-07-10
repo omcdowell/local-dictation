@@ -79,10 +79,13 @@ security import "$P12" -k "$KEYCHAIN" -P "$P12_PASS" \
 
 # Let codesign use the private key without a GUI popup on every build. This step
 # needs your login keychain password once (the same one you type at login); it
-# is read straight into `security` and never stored.
+# is read straight into `security` and never stored. `set-key-partition-list`
+# has no stdin option for -k, so the password is passed on its command line and
+# is briefly visible in the process list (ps) for the duration of that one call.
 echo
 echo "One-time step: your login keychain password lets future builds sign without"
-echo "a popup. It is passed directly to 'security' and is not stored anywhere."
+echo "a popup. It is passed directly to 'security' and is not stored anywhere"
+echo "(though it is briefly visible in the process list during this one command)."
 printf "Login keychain password: "
 read -r -s KEYCHAIN_PW
 echo
