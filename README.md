@@ -54,16 +54,33 @@ Grant **Microphone**, **Accessibility**, and **Input Monitoring** to the **insta
 
 The package is **arm64** and **ad-hoc signed**, not notarized. A quarantined copy transferred to another Mac may need the normal **right-click → Open** / Open Anyway flow. Do not disable Gatekeeper globally.
 
-Install the mic-key remap from the app menu (**Install mic-key remap…**), or manually:
+### Setup Checklist
+
+On first launch (until you finish), Local Dictation opens an ordered **Local Dictation Setup** checklist:
+
+1. **Microphone** — request access or open Privacy & Security → Microphone
+2. **Accessibility** — open Privacy & Security → Accessibility
+3. **Input Monitoring** — open Privacy & Security → Input Monitoring and confirm you reviewed it (macOS does not expose a reliable TCC status for the `hidutil` child process; a successful set+readback is the functional test)
+4. **Mic-key remap** — **Install/Test Remap**; optionally keep **Reapply at login (recommended)** so a LaunchAgent reapplies the mapping at login
+5. **System Dictation shortcut** — open Keyboard → Dictation → Shortcut and turn it Off (or confirm manually)
+6. **Siri press-and-hold F5** — open Apple Intelligence & Siri and confirm press-and-hold is Off
+
+Re-open anytime from the menu: **Setup Checklist…**. Closing the window means finish later and it auto-opens again next launch until **Finish Setup** succeeds.
+
+**Remove mic-key remap** clears the active mapping, removes the app-owned LaunchAgent, and suppresses future restore prompts until you install again.
+
+After reboot or sleep, if the app expects the remap and it is missing, you are prompted to **Restore Now** / **Repair Persistence**, **Open Setup**, or **Not Now**. Session-only installs (persistence off, or plain `make remap`) still set an expectation after a verified install, so a reboot can ask to restore for that login.
+
+Manual Makefile commands remain available for troubleshooting:
 
 ```bash
-make remap    # 🎤 → F13
+make remap    # 🎤 → F13 (session only)
 make unremap  # restore stock mapping
 ```
 
 ## Permissions
 
-Grant these before first use (the app prompts where it can):
+The Setup Checklist walks these in order. Manual paths if a deep link fails:
 
 | Permission | System Settings path | Why |
 |---|---|---|
@@ -71,7 +88,7 @@ Grant these before first use (the app prompts where it can):
 | **Accessibility** | System Settings → Privacy & Security → Accessibility | Caret location (AX) + text insertion |
 | **Input Monitoring** | System Settings → Privacy & Security → Input Monitoring | `hidutil` mic-key remap on macOS 15+ |
 
-After granting, quit and relaunch the app if a permission was denied on first try.
+After granting, return to the app (or click Refresh) so the checklist updates. A denied microphone may need a relaunch after changing System Settings.
 
 ### Required: turn off system Dictation shortcut
 
@@ -86,7 +103,7 @@ Otherwise macOS will steal the mic key:
 - **Press to Toggle** (default): press **🎤** to start; press again to stop and flush.
 - **⌥⌘D** and the menu Start/Stop item always toggle, regardless of mic-key mode.
 - Press **Esc** while active to cancel immediately (already-typed text stays; in terminal buffer mode the buffer is discarded).
-- Menu bar: Start/Stop, Mic Key Mode, remap install, Launch at Login, permission status, Quit.
+- Menu bar: Start/Stop, Mic Key Mode, **Setup Checklist…**, Remove mic-key remap, Launch at Login, permission status, Quit.
 
 ### Terminal mode
 
@@ -188,9 +205,9 @@ uv run python scripts/ws_smoke.py test.wav
 
 **Model download on first run** — Without `make model`, the first server start downloads ~3.5 GB from Hugging Face. The menu shows Downloading while recognized progress lines appear; silence (or the absolute cap) times out with details. Prefer `make model` beforehand.
 
-**Mic key still opens system Dictation** — Remap not installed, or Dictation shortcut still on. Run `make remap` (or use the app menu), set Shortcut → Off, and grant Input Monitoring if `hidutil` fails on macOS 15+.
+**Mic key still opens system Dictation** — Remap not installed, or Dictation shortcut still on. Open **Setup Checklist…**, install/test the remap, set Shortcut → Off, and grant Input Monitoring if `hidutil` fails on macOS 15+.
 
-**Remap lost after reboot** — Install the LaunchAgent from the app UI (`~/Library/LaunchAgents/com.local-dictation.keyremap.plist`). Plain `make remap` is session-only.
+**Remap lost after reboot** — Prefer **Reapply at login** in Setup (writes `~/Library/LaunchAgents/com.local-dictation.keyremap.plist`). If the app expects the mapping, it prompts to restore after launch/wake. Plain `make remap` is session-only; explicit **Remove mic-key remap** suppresses restore prompts.
 
 ## Licenses / attribution
 
