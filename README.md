@@ -32,12 +32,16 @@ This development path intentionally uses the repo venv (`server/.venv/bin/local-
 
 ## Packaged app (`make package`)
 
-Build a Finder-launchable, ad-hoc–signed app that embeds a relocatable CPython + MLX server runtime:
+Build a Finder-launchable app that embeds a relocatable CPython + MLX server runtime:
 
 ```bash
-make package         # → dist/LocalDictation.app
-make package-check   # layout, signatures, bundled `python3 -m … --help`
+make signing-identity  # one-time: stable self-signed identity (see below)
+make package           # → dist/LocalDictation.app
+make package-check      # layout, signatures, bundled `python3 -m … --help`
 ```
+
+If you skip `make signing-identity`, the app is signed **ad-hoc** and everything
+works **except Launch at Login**, which won't persist (see below).
 
 ### Install
 
@@ -52,7 +56,20 @@ Grant **Microphone**, **Accessibility**, and **Input Monitoring** to the **insta
 
 **Launch at Login** is offered only from the installed `/Applications` copy and may require approval under **System Settings → General → Login Items**. Raw `make run` builds and uninstalled bundles show “install in /Applications first”.
 
-The package is **arm64** and **ad-hoc signed**, not notarized. A quarantined copy transferred to another Mac may need the normal **right-click → Open** / Open Anyway flow. Do not disable Gatekeeper globally.
+### Persistent Launch at Login (one-time signing setup)
+
+Launch at Login (`SMAppService.mainApp`) only persists when the app carries a **stable** code signature. An **ad-hoc** signature (the default with no identity) has a designated requirement derived from the build's cdhash, which changes every rebuild — so `backgroundtaskmanagementd` can never re-match its stored login-item record and the toggle silently resets to “unavailable” (`.notFound`).
+
+Create a stable, self-signed code-signing identity once, then package:
+
+```bash
+make signing-identity   # prompts for your login keychain password once
+make package            # auto-detects and signs with that identity
+```
+
+`make signing-identity` (→ `scripts/create-signing-identity.sh`) generates a self-signed **code-signing** certificate named `Local Dictation Signing` in your **login keychain** and authorises `codesign` to use it non-interactively. It's idempotent and **local-only** — not a distribution identity and not tied to an Apple account. `package-app.sh` then signs with an explicit designated requirement anchored to the certificate's Common Name, so rebuilds (and even regenerating the cert under the same name) keep existing Launch-at-Login registrations valid. Because that requirement is anchored only to the Common Name (no certificate-chain anchor clause), any locally-created cert with the same CN also satisfies it — a deliberate tradeoff that keeps registrations stable across cert regeneration; it is a persistence mechanism, not a security boundary. To use a real **Developer ID** instead, pass `CODESIGN_IDENTITY="Developer ID Application: …" make package`.
+
+The package is **arm64** and, by default (without the step above), **ad-hoc signed** and not notarized. A quarantined copy transferred to another Mac may need the normal **right-click → Open** / Open Anyway flow. Do not disable Gatekeeper globally.
 
 ### Setup Checklist
 

@@ -1062,16 +1062,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch service.status {
             case .enabled:
                 try service.unregister()
-            case .notRegistered:
+            case .notRegistered, .notFound:
+                // .notFound is not a dead end: on several macOS versions a valid,
+                // never-registered app reports .notFound rather than .notRegistered
+                // (and it also appears after the system drops an orphaned record).
+                // Treat it like .notRegistered and attempt registration; the catch
+                // below surfaces the real reason if the system genuinely refuses.
                 try service.register()
             case .requiresApproval:
                 SMAppService.openSystemSettingsLoginItems()
-            case .notFound:
-                presentLaunchAtLoginAlert(
-                    message: "Launch at Login is unavailable",
-                    informative:
-                        "macOS could not find this app’s login-item registration. Reinstall Local Dictation into /Applications, relaunch that copy, and try again."
-                )
             @unknown default:
                 presentLaunchAtLoginAlert(
                     message: "Launch at Login",
@@ -1079,10 +1078,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
             }
         } catch {
-            AppLog.general.error("Launch at login failed: \(error.localizedDescription, privacy: .public)")
+            let nsError = error as NSError
+            AppLog.general.error(
+                "Launch at login failed: \(error.localizedDescription, privacy: .public) [\(nsError.domain, privacy: .public) \(nsError.code, privacy: .public)]"
+            )
             presentLaunchAtLoginAlert(
-                message: "Launch at Login",
-                informative: "Couldn't update login item: \(error.localizedDescription)"
+                message: "Launch at Login couldn’t be enabled",
+                informative:
+                    "The system refused the login-item registration:\n\n\(error.localizedDescription) (\(nsError.domain) \(nsError.code))\n\nIf this persists, the app likely needs a signing identity the system trusts."
             )
         }
         refreshLaunchAtLoginItem()
@@ -1356,15 +1359,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .enabled:
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .on
-        case .notRegistered:
+        case .notRegistered, .notFound:
+            // .notFound is treated like .notRegistered here to match
+            // toggleLaunchAtLogin(), which registers on click in both states.
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .off
         case .requiresApproval:
             launchAtLoginItem.title = "Launch at Login (approval required…)"
             launchAtLoginItem.state = .mixed
-        case .notFound:
-            launchAtLoginItem.title = "Launch at Login (unavailable)"
-            launchAtLoginItem.state = .off
         @unknown default:
             launchAtLoginItem.title = "Launch at Login"
             launchAtLoginItem.state = .off
