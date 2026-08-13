@@ -16,6 +16,14 @@ _Avoid_: Recording, connection
 The local speech-recognition capability that holds the model in memory and produces transcript updates. It may be ready or dormant independently of whether a dictation session exists.
 _Avoid_: Backend, engine, Python server
 
+**Speech provider**:
+The chosen speech-recognition model behind the speech runtime. Selecting a different provider replaces the running speech runtime; it does not affect an accepted dictation request's meaning.
+_Avoid_: Backend, mode
+
+**Draft transcript**:
+A transcript update that supersedes everything produced so far in the session and may revise earlier words. Distinct from an appended update, which only adds to what was already inserted.
+_Avoid_: Partial, interim, delta
+
 **Ready**:
 The speech runtime is available to begin a dictation session without loading the model again.
 _Avoid_: Idle, connected
@@ -33,16 +41,16 @@ The period after microphone capture stops while trailing transcript text is prod
 _Avoid_: Processing, stop
 
 **Cancellation**:
-User-requested immediate termination of a dictation session without waiting for trailing transcript output. Text already inserted live remains, while text buffered for a terminal target is discarded.
+User-requested immediate termination of a dictation session without waiting for trailing transcript output. Text already inserted remains as-is.
 _Avoid_: Stop, finalization
 
 **Interruption**:
-Unexpected termination of a dictation session because the speech runtime became unavailable. Inserted live text remains, buffered terminal-target text is discarded, and a new user request is required after recovery.
+Unexpected termination of a dictation session because the speech runtime became unavailable. Inserted text remains and a new user request is required after recovery.
 _Avoid_: Cancellation, automatic resume
 
 **Terminal target**:
-A focused application where incremental insertion could execute commands. Transcript text is buffered for the session and inserted once after successful finalization.
-_Avoid_: Shell mode, console
+A focused application where an inserted line break could execute a command. Transcript text is still inserted live, with line breaks and tabs collapsed to spaces so no command is submitted mid-dictation.
+_Avoid_: Shell mode, console, buffered insertion
 
 ## Example dialogue
 
@@ -56,8 +64,8 @@ _Avoid_: Shell mode, console
 >
 > **Developer:** The user pressed Escape while finalization was in progress for a terminal target.
 >
-> **Domain expert:** Cancel the session and discard the terminal target’s buffered text.
+> **Domain expert:** Cancel the session. Text already inserted stays; no line break is ever inserted into a terminal target.
 >
 > **Developer:** The speech runtime failed during a different session.
 >
-> **Domain expert:** That session was interrupted. Preserve inserted live text, discard any terminal-target buffer, and wait for a new dictation request after recovery.
+> **Domain expert:** That session was interrupted. Preserve inserted text and wait for a new dictation request after recovery.

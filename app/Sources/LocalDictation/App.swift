@@ -297,7 +297,6 @@ final class DictationController {
         cancellationBarrier.reset()
         escapeHotKey.unregister()
         stopAudioCapture()
-        textInserter.discard()
         sessionTranscript = ""
         endIndicatorSession(playSound: false)
         realtime.disconnect()
@@ -423,7 +422,6 @@ final class DictationController {
         if !realtime.commitFinal() {
             AppLog.general.error("commitFinal enqueue failed — tearing down locally")
             escapeHotKey.unregister()
-            textInserter.discard()
             sessionTranscript = ""
             endIndicatorSession(playSound: true)
             if realtime.isConnected, case .running = supervisor.state {
@@ -443,7 +441,6 @@ final class DictationController {
         intent.clearAll()
         escapeHotKey.unregister()
         stopAudioCapture()
-        textInserter.discard()
         sessionTranscript = ""
         endIndicatorSession(playSound: true)
 
@@ -542,7 +539,6 @@ final class DictationController {
             try startAudioCapture(sendAudio)
         } catch {
             intent.clearAll()
-            textInserter.discard()
             transition(to: .failed(.app(error.localizedDescription)))
             return
         }
@@ -555,7 +551,7 @@ final class DictationController {
         }
         transition(to: .listening)
         AppLog.general.info(
-            "Dictation started — mode=\(self.textInserter.mode.rawValue, privacy: .public)"
+            "Dictation started — stripLineBreaks=\(self.textInserter.stripLineBreaks, privacy: .public)"
         )
     }
 
@@ -678,7 +674,6 @@ final class DictationController {
         cancellationBarrier.reset()
         escapeHotKey.unregister()
         stopAudioCapture()
-        textInserter.discard()
         sessionTranscript = ""
         endIndicatorSession(playSound: true)
         realtime.disconnect()
@@ -704,7 +699,6 @@ final class DictationController {
                 intent.interruptActiveSession()
                 escapeHotKey.unregister()
                 stopAudioCapture()
-                textInserter.discard()
                 endIndicatorSession(playSound: true)
                 transition(to: .starting)
             } else if state == .ready {
@@ -713,7 +707,6 @@ final class DictationController {
             } else if state == .flushing {
                 intent.clearAll()
                 escapeHotKey.unregister()
-                textInserter.discard()
                 endIndicatorSession(playSound: true)
                 transition(to: .starting)
             }

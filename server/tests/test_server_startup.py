@@ -24,10 +24,22 @@ def _free_loopback_port() -> int:
 
 def _startup_heartbeat_lines(buf: io.StringIO) -> list[str]:
     return [
-        line
-        for line in buf.getvalue().splitlines()
-        if line.startswith("[startup]")
+        line for line in buf.getvalue().splitlines() if line.startswith("[startup]")
     ]
+
+
+def _asr_module_names() -> set[str]:
+    """Heavy ASR modules currently loaded process-wide.
+
+    Other suites (parakeet backend) legitimately import mlx at call time, so the
+    startup invariant is "this path imports no *new* ASR module", not "none is
+    loaded anywhere".
+    """
+    return {
+        name
+        for name in sys.modules
+        if name.startswith("mlx") or name.startswith("voxmlx")
+    }
 
 
 class TestReserveServerSocket(unittest.TestCase):
@@ -51,6 +63,7 @@ class TestReserveServerSocket(unittest.TestCase):
         # Reservation is fully separable from create_app: this module never
         # imports mlx/voxmlx, so a port collision cannot invoke the model factory.
         port = _free_loopback_port()
+        asr_before = _asr_module_names()
         holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         holder.bind(("127.0.0.1", port))
@@ -75,18 +88,14 @@ class TestReserveServerSocket(unittest.TestCase):
         self.assertIn("host=127.0.0.1", fatal)
         self.assertIn(f"port={port}", fatal)
         self.assertNotIn("local_dictation_server.server", sys.modules)
-        self.assertFalse(
-            any(
-                name.startswith("mlx") or name.startswith("voxmlx")
-                for name in sys.modules
-            )
-        )
+        self.assertEqual(_asr_module_names(), asr_before)
 
 
 class TestStartupHeartbeat(unittest.TestCase):
     def test_emits_during_slow_load_then_stops_when_ready(self) -> None:
         """Simulated blocking load: heartbeats at the interval, then silence after ready."""
         stderr = io.StringIO()
+        asr_before = _asr_module_names()
         interval = 0.05
         heartbeat = start_startup_heartbeat(interval=interval, stream=stderr)
         try:
@@ -125,12 +134,7 @@ class TestStartupHeartbeat(unittest.TestCase):
             heartbeat.stop()
 
         self.assertNotIn("local_dictation_server.server", sys.modules)
-        self.assertFalse(
-            any(
-                name.startswith("mlx") or name.startswith("voxmlx")
-                for name in sys.modules
-            )
-        )
+        self.assertEqual(_asr_module_names(), asr_before)
 
     def test_stop_on_failed_startup_is_safe(self) -> None:
         stderr = io.StringIO()

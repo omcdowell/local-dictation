@@ -50,13 +50,17 @@ class ParakeetStreamSession:
     def __init__(self, model: Any, chunk_seconds: float = 0.5):
         self.model = model
         self.chunk_seconds = max(0.2, float(chunk_seconds))
-        self.sample_rate = int(getattr(model.preprocessor_config, "sample_rate", 16_000))
+        self.sample_rate = int(
+            getattr(model.preprocessor_config, "sample_rate", 16_000)
+        )
         self.chunk_samples = int(self.sample_rate * self.chunk_seconds)
         self.min_partial_samples = int(self.sample_rate * _MIN_PARTIAL_SECONDS)
         self._reset_stream()
 
     def _reset_stream(self) -> None:
-        self.stream_cm = self.model.transcribe_stream(context_size=_DEFAULT_CONTEXT_SIZE)
+        self.stream_cm = self.model.transcribe_stream(
+            context_size=_DEFAULT_CONTEXT_SIZE
+        )
         self.transcriber = self.stream_cm.__enter__()
         self.pending = np.zeros(0, dtype=np.float32)
         self.utterance = np.zeros(0, dtype=np.float32)
@@ -79,7 +83,7 @@ class ParakeetStreamSession:
 
     def _to_mx(self, chunk: np.ndarray) -> Any:
         try:
-            import mlx.core as mx
+            import mlx.core as mx  # ty: ignore[unresolved-import]  (native extension, no stubs)
 
             return mx.array(chunk)
         except ImportError:
@@ -98,7 +102,9 @@ class ParakeetStreamSession:
         self.emitted_text = full
         return TranscriptEvent(text=full, absolute=True)
 
-    def _push_chunk(self, chunk: np.ndarray, *, allow_partial: bool = True) -> TranscriptEvent | None:
+    def _push_chunk(
+        self, chunk: np.ndarray, *, allow_partial: bool = True
+    ) -> TranscriptEvent | None:
         self.transcriber.add_audio(self._to_mx(chunk))
         self._samples_fed += int(chunk.size)
         full = (self.transcriber.result.text or "").strip()
@@ -120,7 +126,9 @@ class ParakeetStreamSession:
             else audio_f32.copy()
         )
         self.pending = (
-            np.concatenate([self.pending, audio_f32]) if self.pending.size else audio_f32
+            np.concatenate([self.pending, audio_f32])
+            if self.pending.size
+            else audio_f32
         )
         events: list[TranscriptEvent] = []
         while self.pending.size >= self.chunk_samples:
@@ -147,7 +155,9 @@ class ParakeetStreamSession:
             result = self.model.generate(mel)[0]
             return (getattr(result, "text", None) or "").strip()
         except Exception:
-            logger.exception("parakeet batch generate failed; falling back to stream text")
+            logger.exception(
+                "parakeet batch generate failed; falling back to stream text"
+            )
             return (self.full_text or self.emitted_text or "").strip()
 
     def finalize(self) -> list[TranscriptEvent]:
@@ -194,11 +204,20 @@ def create_parakeet_app(model_id: str, chunk_seconds: float = 0.5):
     model = from_pretrained(model_id)
     logger.info("parakeet-mlx loaded in %.1fs", time.monotonic() - t0)
 
+    # Same ceiling as the Voxtral path: the app holds one long-lived WebSocket,
+    # so without a cap MLX's pool of freed-but-retained Metal buffers grows for
+    # the life of the connection (observed ~14 GB). 512 MB is ample for reuse.
+    import mlx.core as mx  # ty: ignore[unresolved-import]  (native extension, no stubs)
+
+    mx.set_cache_limit(512 * 1024 * 1024)
+
     app = FastAPI(title="local-dictation parakeet-mlx server")
 
     @app.get("/health")
     async def health() -> JSONResponse:
-        return JSONResponse({"status": "ok", "backend": "parakeet-mlx", "model": model_id})
+        return JSONResponse(
+            {"status": "ok", "backend": "parakeet-mlx", "model": model_id}
+        )
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
@@ -213,7 +232,9 @@ def create_parakeet_app(model_id: str, chunk_seconds: float = 0.5):
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                    await websocket.send_json(
+                        {"type": "error", "message": "Invalid JSON"}
+                    )
                     continue
 
                 msg_type = msg.get("type", "")
@@ -275,5 +296,6 @@ def create_parakeet_app(model_id: str, chunk_seconds: float = 0.5):
             logger.exception("WebSocket error (parakeet-mlx)")
         finally:
             session.close()
+            mx.clear_cache()
 
     return app

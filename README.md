@@ -137,13 +137,13 @@ Otherwise macOS will steal the mic key:
 - **Hold to Talk** (Mic Key Mode): hold **🎤** to dictate — a blue mic indicator appears at the caret; release to stop and flush trailing tokens.
 - **Press to Toggle** (default): press **🎤** to start; press again to stop and flush.
 - **⌥⌘D** and the menu Start/Stop item always toggle, regardless of mic-key mode.
-- Press **Esc** while active to cancel immediately (already-typed text stays; in terminal buffer mode the buffer is discarded).
-- Menu bar: Start/Stop, Mic Key Mode, **Speech Provider** (Voxtral ↔ Parakeet, plus **Choose Parakeet Model Folder…**), **Setup Checklist…**, Remove mic-key remap, Launch at Login, permission status, Quit.
-- Switching providers or the Parakeet model folder saves `config.json` and restarts the speech runtime in-place (no full app quit).
+- Press **Esc** while active to cancel immediately; text already typed stays.
+- Menu bar: Start/Stop, Mic Key Mode, **Speech Provider** (Voxtral ↔ Parakeet CoreML ↔ Parakeet MLX, plus **Choose Parakeet CoreML/MLX Model Folder…**), **Setup Checklist…**, Remove mic-key remap, Launch at Login, permission status, Quit.
+- Switching providers or a Parakeet model folder saves `config.json` and restarts the speech runtime in-place (no full app quit).
 
 ### Terminal mode
 
-In terminal-like apps (Terminal, iTerm2, Ghostty, Warp, kitty, Alacritty, and AX-detected shells), text is **buffered and inserted once on stop**. Newlines/tabs become spaces so a mid-stream newline cannot submit a command.
+In terminal-like apps (Terminal, iTerm2, Ghostty, Warp, kitty, Alacritty, and AX-detected shells), text still streams live, but newlines/tabs are replaced with spaces before any keystroke is posted so dictation can never submit a shell command.
 
 ## Server launch command
 
@@ -197,8 +197,8 @@ Or use a Hugging Face id instead of a local path: `"model": "mlx-community/parak
 - **Python providers** (`voxtral`, `parakeet-mlx`): `serverExecutable`, `port` (default `8471`), `model` (HF id). An invalid `port` is reported rather than silently defaulted. For Parakeet MLX: `cd server && uv sync --group parakeet --python 3.12` (Python 3.12 recommended; 3.14 is not supported).
 - **CoreML keys:** `parakeetModelPath` — optional staged [FluidInference/parakeet-tdt-0.6b-v3-coreml](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml) folder. Auto-discovers `~/parakeet-tdt-0.6b-v3-coreml` or FluidAudio cache. Menu: **Choose Parakeet CoreML Model Folder…**
 - **MLX keys:** `parakeetMlxModelPath` — optional staged [mlx-community/parakeet-tdt-0.6b-v3](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3) folder (e.g. `~/parakeet-tdt-0.6b-v3`). Passed as `--model` so loads stay offline. Auto-discovers that home path; otherwise falls back to `model` / the default HF id. Menu: **Choose Parakeet MLX Model Folder…**
-- **`parakeetChunkSeconds`** (default `0.75`): CoreML sliding-window stride / MLX `transcribe_stream` step. Lower = snappier partials.
-- CoreML TDT uses overlapping windows (not EOU). MLX uses true streaming and is often the lower-latency partials path if you have the Python env set up. Hold-to-talk and terminal buffer mode still apply.
+- **`parakeetChunkSeconds`** (default `1.5`): CoreML sliding-window stride / MLX `transcribe_stream` step. Lower = snappier partials.
+- CoreML TDT uses overlapping windows (not EOU). MLX uses true streaming and is often the lower-latency partials path if you have the Python env set up. Hold-to-talk and terminal line-break stripping still apply.
 - `idleUnloadMinutes` (default `10`): minutes of inactivity before unload. `0` keeps the runtime always resident.
 
 ## Server status, errors, and recovery
