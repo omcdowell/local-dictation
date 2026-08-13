@@ -126,7 +126,7 @@ final class DictationController {
 
     private let config: AppConfig
     private let deps: Dependencies
-    private let supervisor: ServerSupervisor
+    private let supervisor: any SpeechRuntime
     private let realtime: any DictationRealtimeClient
     private let idleScheduler: IdleUnloadScheduler
     private let audio = AudioCapture()
@@ -150,6 +150,9 @@ final class DictationController {
     /// Test seam: whether the idle unload deadline is currently armed.
     var isIdleSchedulerArmed: Bool { idleScheduler.isArmed }
 
+    /// Test seam: underlying speech runtime (Voxtral supervisor or Parakeet).
+    var speechRuntime: any SpeechRuntime { supervisor }
+
     convenience init(config: AppConfig) {
         self.init(config: config, dependencies: .production())
     }
@@ -157,13 +160,29 @@ final class DictationController {
     init(
         config: AppConfig,
         dependencies: Dependencies,
-        supervisor: ServerSupervisor? = nil,
+        supervisor: (any SpeechRuntime)? = nil,
         realtime: (any DictationRealtimeClient)? = nil
     ) {
         self.config = config
         self.deps = dependencies
-        self.supervisor = supervisor ?? ServerSupervisor(config: config)
-        self.realtime = realtime ?? RealtimeClient(endpoint: config.websocketURL)
+
+        // Production wiring: pick Voxtral (Python WS) or Parakeet (in-process CoreML).
+        // Tests inject both seams explicitly.
+        if let supervisor, let realtime {
+            self.supervisor = supervisor
+            self.realtime = realtime
+        } else if let supervisor {
+            self.supervisor = supervisor
+            self.realtime = realtime ?? Self.makeRealtimeClient(config: config, sharedEngine: nil)
+        } else if let realtime {
+            self.supervisor = Self.makeSpeechRuntime(config: config, sharedEngine: nil)
+            self.realtime = realtime
+        } else {
+            let pair = Self.makeProviderPair(config: config)
+            self.supervisor = pair.runtime
+            self.realtime = pair.client
+        }
+
         self.idleScheduler = IdleUnloadScheduler(
             timeout: config.idleUnloadTimeout,
             sleep: dependencies.sleep
@@ -183,9 +202,9 @@ final class DictationController {
 
         self.realtime.setCallbacks(
             RealtimeClient.Callbacks(
-                onDelta: { [weak self] delta in
+                onDelta: { [weak self] text, absolute in
                     Task { @MainActor in
-                        self?.handleDelta(delta)
+                        self?.handleDelta(text, absolute: absolute)
                     }
                 },
                 onDone: { [weak self] transcript in
@@ -216,6 +235,52 @@ final class DictationController {
                 }
             )
         )
+    }
+
+    /// Builds a matched runtime + client pair for the configured provider.
+    private static func makeProviderPair(
+        config: AppConfig
+    ) -> (runtime: any SpeechRuntime, client: any DictationRealtimeClient) {
+        switch config.provider {
+        case .voxtral, .parakeetMlx:
+            return (ServerSupervisor(config: config), RealtimeClient(endpoint: config.websocketURL))
+        case .parakeet:
+            let engine = ParakeetEngine()
+            return (
+                ParakeetRuntime(config: config, engine: engine),
+                ParakeetRealtimeClient(
+                    engine: engine,
+                    chunkSeconds: config.parakeetChunkSeconds
+                )
+            )
+        }
+    }
+
+    private static func makeSpeechRuntime(
+        config: AppConfig,
+        sharedEngine: ParakeetEngine?
+    ) -> any SpeechRuntime {
+        switch config.provider {
+        case .voxtral, .parakeetMlx:
+            return ServerSupervisor(config: config)
+        case .parakeet:
+            return ParakeetRuntime(config: config, engine: sharedEngine ?? ParakeetEngine())
+        }
+    }
+
+    private static func makeRealtimeClient(
+        config: AppConfig,
+        sharedEngine: ParakeetEngine?
+    ) -> any DictationRealtimeClient {
+        switch config.provider {
+        case .voxtral, .parakeetMlx:
+            return RealtimeClient(endpoint: config.websocketURL)
+        case .parakeet:
+            return ParakeetRealtimeClient(
+                engine: sharedEngine ?? ParakeetEngine(),
+                chunkSeconds: config.parakeetChunkSeconds
+            )
+        }
     }
 
     func bootstrap() {
@@ -279,8 +344,18 @@ final class DictationController {
         switch state {
         case .starting, .downloading, .restarting, .unloading:
             if startIntent == .micHold {
-                if deps.isSecureEventInputEnabled() || !deps.isAccessibilityTrusted() {
+                if deps.isSecureEventInputEnabled() {
                     intent.clearAll()
+                    let message = "Secure input is enabled — dictation refused."
+                    AppLog.general.error("\(message, privacy: .public)")
+                    transition(to: .failed(.secureInput(message)))
+                    return
+                }
+                if !deps.isAccessibilityTrusted() {
+                    intent.clearAll()
+                    let message = "Accessibility permission required — grant it in System Settings."
+                    AppLog.general.error("\(message, privacy: .public)")
+                    transition(to: .failed(.accessibility(message)))
                     return
                 }
                 intent.queue(.micHold)
@@ -645,28 +720,57 @@ final class DictationController {
         }
     }
 
-    private func handleDelta(_ delta: String) {
+    private func handleDelta(_ text: String, absolute: Bool = false) {
         guard cancellationBarrier.shouldAcceptTranscript(phase: transcriptSessionPhase) else { return }
-        sessionTranscript += delta
-        print("[transcript delta] \(delta)")
-        AppLog.general.info("delta: \(delta, privacy: .public)")
-        textInserter.handleDelta(delta)
+        guard !text.isEmpty || absolute else { return }
+
+        if absolute {
+            // Parakeet MLX draft snapshots revise freely — reconcile typed text.
+            // Terminal sessions strip newlines first so tracking matches keystrokes.
+            let previous = sessionTranscript
+            print("[transcript absolute] \(text)")
+            AppLog.general.info(
+                "absolute partial chars=\(text.count, privacy: .public) prev=\(previous.count, privacy: .public)"
+            )
+            sessionTranscript = textInserter.applyLiveTranscript(
+                previouslyEmitted: previous,
+                text: text
+            )
+            return
+        }
+
+        let prepared = textInserter.prepared(text)
+        guard !prepared.isEmpty else { return }
+        sessionTranscript += prepared
+        print("[transcript delta] \(prepared)")
+        AppLog.general.info("delta: \(prepared, privacy: .public)")
+        textInserter.handleDelta(text)
     }
 
     private func handleDone(_ transcript: String) {
         guard cancellationBarrier.shouldAcceptTranscript(phase: transcriptSessionPhase) else { return }
+        // Prefer server final text; fall back to what we already streamed.
         let finalText = transcript.isEmpty ? sessionTranscript : transcript
+        let previouslyEmitted = sessionTranscript
         print("[transcript done] \(finalText)")
-        AppLog.general.info("done: \(finalText, privacy: .public)")
-        sessionTranscript = ""
+        AppLog.general.info(
+            "done: \(finalText, privacy: .public) previously=\(previouslyEmitted.count, privacy: .public) chars"
+        )
 
         if state == .flushing {
-            let inserted = textInserter.flush()
+            // Stream mode previously ignored done.text (only live deltas typed),
+            // so sticky draft hallucinations (\"yeah\") were never corrected.
+            // Buffer mode replaces the accumulated buffer with the final text.
+            let inserted = textInserter.commitFinal(
+                previouslyEmitted: previouslyEmitted,
+                finalText: finalText
+            )
             if !inserted.isEmpty {
                 AppLog.general.info(
-                    "buffer flush inserted \(inserted.count, privacy: .public) chars"
+                    "final commit inserted/reconciled \(inserted.count, privacy: .public) chars stripLineBreaks=\(self.textInserter.stripLineBreaks, privacy: .public)"
                 )
             }
+            sessionTranscript = ""
             intent.clearAll()
             escapeHotKey.unregister()
             endIndicatorSession(playSound: true)
@@ -676,6 +780,8 @@ final class DictationController {
             } else {
                 transition(to: .starting)
             }
+        } else {
+            sessionTranscript = ""
         }
     }
 
@@ -740,6 +846,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var micKeyModeItem: NSMenuItem!
     private var holdToTalkModeItem: NSMenuItem!
     private var pressToToggleModeItem: NSMenuItem!
+    private var speechProviderItem: NSMenuItem!
+    private var voxtralProviderItem: NSMenuItem!
+    private var parakeetProviderItem: NSMenuItem!
+    private var parakeetMlxProviderItem: NSMenuItem!
+    private var parakeetModelPathItem: NSMenuItem!
+    private var parakeetMlxModelPathItem: NSMenuItem!
+    private var clearParakeetMlxPathItem: NSMenuItem!
+    private var clearParakeetPathItem: NSMenuItem!
     private var micPermissionItem: NSMenuItem!
     private var axPermissionItem: NSMenuItem!
     private var secureInputItem: NSMenuItem!
@@ -920,6 +1034,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         playSoundsItem.target = self
         menu.addItem(playSoundsItem)
 
+        let speechProviderMenu = NSMenu()
+        voxtralProviderItem = NSMenuItem(
+            title: SpeechProvider.voxtral.displayName,
+            action: #selector(selectVoxtralProvider),
+            keyEquivalent: ""
+        )
+        voxtralProviderItem.target = self
+        speechProviderMenu.addItem(voxtralProviderItem)
+
+        parakeetProviderItem = NSMenuItem(
+            title: SpeechProvider.parakeet.displayName,
+            action: #selector(selectParakeetProvider),
+            keyEquivalent: ""
+        )
+        parakeetProviderItem.target = self
+        speechProviderMenu.addItem(parakeetProviderItem)
+
+        parakeetMlxProviderItem = NSMenuItem(
+            title: SpeechProvider.parakeetMlx.displayName,
+            action: #selector(selectParakeetMlxProvider),
+            keyEquivalent: ""
+        )
+        parakeetMlxProviderItem.target = self
+        speechProviderMenu.addItem(parakeetMlxProviderItem)
+
+        speechProviderMenu.addItem(.separator())
+
+        parakeetModelPathItem = NSMenuItem(
+            title: "Choose Parakeet CoreML Model Folder…",
+            action: #selector(chooseParakeetModelPath),
+            keyEquivalent: ""
+        )
+        parakeetModelPathItem.target = self
+        speechProviderMenu.addItem(parakeetModelPathItem)
+
+        clearParakeetPathItem = NSMenuItem(
+            title: "Clear Parakeet CoreML Model Path",
+            action: #selector(clearParakeetModelPath),
+            keyEquivalent: ""
+        )
+        clearParakeetPathItem.target = self
+        speechProviderMenu.addItem(clearParakeetPathItem)
+
+        parakeetMlxModelPathItem = NSMenuItem(
+            title: "Choose Parakeet MLX Model Folder…",
+            action: #selector(chooseParakeetMlxModelPath),
+            keyEquivalent: ""
+        )
+        parakeetMlxModelPathItem.target = self
+        speechProviderMenu.addItem(parakeetMlxModelPathItem)
+
+        clearParakeetMlxPathItem = NSMenuItem(
+            title: "Clear Parakeet MLX Model Path",
+            action: #selector(clearParakeetMlxModelPath),
+            keyEquivalent: ""
+        )
+        clearParakeetMlxPathItem.target = self
+        speechProviderMenu.addItem(clearParakeetMlxPathItem)
+
+        speechProviderItem = NSMenuItem(title: "Speech Provider", action: nil, keyEquivalent: "")
+        speechProviderItem.submenu = speechProviderMenu
+        menu.addItem(speechProviderItem)
+
         menu.addItem(.separator())
 
         micPermissionItem = NSMenuItem(
@@ -958,6 +1135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshLaunchAtLoginItem()
         refreshPlaySoundsItem()
         refreshMicKeyModeItems()
+        refreshSpeechProviderItems()
         refreshRemapItems()
         refreshUI(for: .idle)
 
@@ -1026,6 +1204,167 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectPressToToggleMode() {
         MicKeyMode.write(.toggle, to: AppIdentity.defaults)
         refreshMicKeyModeItems()
+    }
+
+    @objc private func selectVoxtralProvider() {
+        applySpeechProvider(.voxtral)
+    }
+
+    @objc private func selectParakeetProvider() {
+        applySpeechProvider(.parakeet)
+    }
+
+    @objc private func selectParakeetMlxProvider() {
+        applySpeechProvider(.parakeetMlx)
+    }
+
+    @objc private func chooseParakeetModelPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Select"
+        panel.message =
+            "Select a Parakeet TDT v3 CoreML model folder (Preprocessor/Encoder/Decoder/JointDecisionv3 + parakeet_vocab.json)."
+        if let current = config.parakeetModelPath, !current.isEmpty {
+            let expanded = (current as NSString).expandingTildeInPath
+            panel.directoryURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        } else {
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        }
+
+        // Accessory-only apps need activation so the open panel is visible.
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        guard ParakeetEngine.containsV3Bundles(at: url)
+            || ParakeetEngine.makeLoadableDirectory(from: url) != nil
+        else {
+            let alert = NSAlert()
+            alert.messageText = "Not a Parakeet TDT v3 model folder"
+            alert.informativeText = """
+            Expected these items inside the folder:
+            • Preprocessor.mlmodelc
+            • Encoder.mlmodelc
+            • Decoder.mlmodelc
+            • JointDecisionv3.mlmodelc
+            • parakeet_vocab.json
+
+            Selected: \(url.path)
+            """
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        config.parakeetModelPath = url.path
+        // Choosing a model folder implies using Parakeet.
+        config.provider = .parakeet
+        config.save()
+        rebootstrapSpeechRuntime()
+        refreshSpeechProviderItems()
+        AppLog.general.info(
+            "Parakeet model path set to \(url.path, privacy: .public); speech runtime restarted"
+        )
+    }
+
+    @objc private func clearParakeetModelPath() {
+        guard config.parakeetModelPath != nil else { return }
+        config.parakeetModelPath = nil
+        config.save()
+        if config.provider == .parakeet {
+            rebootstrapSpeechRuntime()
+        }
+        refreshSpeechProviderItems()
+    }
+
+    @objc private func chooseParakeetMlxModelPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Select"
+        panel.message =
+            "Select a Parakeet TDT MLX model folder (config.json + tokenizer; e.g. ~/parakeet-tdt-0.6b-v3 from mlx-community)."
+        if let current = config.parakeetMlxModelPath, !current.isEmpty {
+            let expanded = (current as NSString).expandingTildeInPath
+            panel.directoryURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        } else if let discovered = AppConfig.discoverParakeetMlxModelDirectory() {
+            panel.directoryURL = discovered
+        } else {
+            panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        guard AppConfig.looksLikeParakeetMlxModelDirectory(url) else {
+            let alert = NSAlert()
+            alert.messageText = "Not a Parakeet MLX model folder"
+            alert.informativeText = """
+            Expected a Hugging Face mlx-community style clone with:
+            • config.json
+            • tokenizer.model (or tokenizer.vocab / vocab.txt / tokenizer.json)
+
+            Do not select the CoreML folder (*-coreml with Encoder.mlmodelc).
+
+            Selected: \(url.path)
+            """
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        config.parakeetMlxModelPath = url.path
+        // Choosing an MLX folder implies using the MLX provider.
+        config.provider = .parakeetMlx
+        config.save()
+        rebootstrapSpeechRuntime()
+        refreshSpeechProviderItems()
+        AppLog.general.info(
+            "Parakeet MLX model path set to \(url.path, privacy: .public); speech runtime restarted"
+        )
+    }
+
+    @objc private func clearParakeetMlxModelPath() {
+        guard config.parakeetMlxModelPath != nil else { return }
+        config.parakeetMlxModelPath = nil
+        config.save()
+        if config.provider == .parakeetMlx {
+            rebootstrapSpeechRuntime()
+        }
+        refreshSpeechProviderItems()
+    }
+
+    private func applySpeechProvider(_ provider: SpeechProvider) {
+        guard config.provider != provider else {
+            refreshSpeechProviderItems()
+            return
+        }
+        config.provider = provider
+        config.save()
+        rebootstrapSpeechRuntime()
+        refreshSpeechProviderItems()
+        AppLog.general.info(
+            "Speech provider switched to \(provider.rawValue, privacy: .public); speech runtime restarted"
+        )
+    }
+
+    /// Tear down the active speech runtime and rebuild from the current config
+    /// so provider / model-path menu changes apply without quitting the app.
+    private func rebootstrapSpeechRuntime() {
+        controller.shutdown()
+        let fresh = DictationController(config: config)
+        fresh.onStateChange = { [weak self] state in
+            self?.refreshUI(for: state)
+        }
+        controller = fresh
+        controller.bootstrap()
+        refreshUI(for: controller.state)
     }
 
     private func handleMicKeyPressed() {
@@ -1098,6 +1437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshRemapItems()
         refreshPlaySoundsItem()
         refreshMicKeyModeItems()
+        refreshSpeechProviderItems()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -1381,6 +1721,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mode = MicKeyMode.read(from: AppIdentity.defaults)
         holdToTalkModeItem.state = mode == .holdToTalk ? .on : .off
         pressToToggleModeItem.state = mode == .toggle ? .on : .off
+    }
+
+    private func refreshSpeechProviderItems() {
+        let provider = config.provider
+        voxtralProviderItem.state = provider == .voxtral ? .on : .off
+        parakeetProviderItem.state = provider == .parakeet ? .on : .off
+        parakeetMlxProviderItem.state = provider == .parakeetMlx ? .on : .off
+        speechProviderItem.title = "Speech Provider: \(provider.displayName)"
+
+        // CoreML + MLX folder pickers (always available; selecting implies that provider).
+        parakeetModelPathItem.isEnabled = true
+        if let path = config.parakeetModelPath, !path.isEmpty {
+            let display = (path as NSString).abbreviatingWithTildeInPath
+            parakeetModelPathItem.title = "CoreML Model: \(display)"
+            clearParakeetPathItem.isEnabled = true
+        } else if let resolved = ParakeetEngine.resolveModelDirectory(explicitPath: nil) {
+            let display = (resolved.path as NSString).abbreviatingWithTildeInPath
+            parakeetModelPathItem.title = "CoreML Model: \(display) (auto)"
+            clearParakeetPathItem.isEnabled = false
+        } else {
+            parakeetModelPathItem.title = "Choose Parakeet CoreML Model Folder…"
+            clearParakeetPathItem.isEnabled = false
+        }
+
+        parakeetMlxModelPathItem.isEnabled = true
+        if let path = config.parakeetMlxModelPath, !path.isEmpty {
+            let display = (path as NSString).abbreviatingWithTildeInPath
+            parakeetMlxModelPathItem.title = "MLX Model: \(display)"
+            clearParakeetMlxPathItem.isEnabled = true
+        } else if let discovered = AppConfig.discoverParakeetMlxModelDirectory() {
+            let display = (discovered.path as NSString).abbreviatingWithTildeInPath
+            parakeetMlxModelPathItem.title = "MLX Model: \(display) (auto)"
+            clearParakeetMlxPathItem.isEnabled = false
+        } else if let model = config.model, !model.isEmpty, config.provider == .parakeetMlx {
+            parakeetMlxModelPathItem.title = "MLX Model: \(model) (HF id)"
+            clearParakeetMlxPathItem.isEnabled = false
+        } else {
+            parakeetMlxModelPathItem.title = "Choose Parakeet MLX Model Folder…"
+            clearParakeetMlxPathItem.isEnabled = false
+        }
     }
 
     private func refreshRemapItems() {

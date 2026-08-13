@@ -1,8 +1,16 @@
 # local-dictation
 
-Native, fully local dictation for macOS — a drop-in replacement for system Dictation. Use the 🎤 mic key in **Hold to Talk** or **Press to Toggle** mode (menu: Mic Key Mode); words stream into the focused app while you speak. Powered by **Voxtral-Mini-4B-Realtime** (6-bit MLX) via [voxmlx](https://github.com/awni/voxmlx) on Apple Silicon.
+Native, fully local dictation for macOS — a drop-in replacement for system Dictation. Use the 🎤 mic key in **Hold to Talk** or **Press to Toggle** mode (menu: Mic Key Mode); words stream into the focused app while you speak.
 
-Two processes, one repo: a Python WebSocket ASR server (`server/`) and a menu-bar Swift app (`app/`) that captures audio, inserts text, and supervises the server.
+**Speech providers** (selected in `config.json`):
+
+| Provider | Default | Runtime | Model |
+|---|---|---|---|
+| **`voxtral`** | yes | Python WebSocket server (`server/`) | Voxtral-Mini-4B-Realtime (6-bit MLX) via [voxmlx](https://github.com/awni/voxmlx) — live streaming deltas |
+| **`parakeet`** | no | In-process [FluidAudio](https://github.com/FluidInference/FluidAudio) CoreML | [Parakeet TDT 0.6B v3 CoreML](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml) — sliding-window partials (`SlidingWindowAsrManager`, short dictation windows) |
+| **`parakeet-mlx`** | no | Python WebSocket server (`parakeet-mlx`) | [mlx-community/parakeet-tdt-0.6b-v3](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3) — true streaming via `transcribe_stream` (often snappier partials on Apple Silicon) |
+
+The menu-bar Swift app (`app/`) always captures audio and inserts text. For `voxtral` and `parakeet-mlx` it supervises the Python speech runtime. For `parakeet` (CoreML) models load in-process (no Python for ASR).
 
 ## Install (release download)
 
@@ -130,7 +138,8 @@ Otherwise macOS will steal the mic key:
 - **Press to Toggle** (default): press **🎤** to start; press again to stop and flush.
 - **⌥⌘D** and the menu Start/Stop item always toggle, regardless of mic-key mode.
 - Press **Esc** while active to cancel immediately (already-typed text stays; in terminal buffer mode the buffer is discarded).
-- Menu bar: Start/Stop, Mic Key Mode, **Setup Checklist…**, Remove mic-key remap, Launch at Login, permission status, Quit.
+- Menu bar: Start/Stop, Mic Key Mode, **Speech Provider** (Voxtral ↔ Parakeet, plus **Choose Parakeet Model Folder…**), **Setup Checklist…**, Remove mic-key remap, Launch at Login, permission status, Quit.
+- Switching providers or the Parakeet model folder saves `config.json` and restarts the speech runtime in-place (no full app quit).
 
 ### Terminal mode
 
@@ -154,15 +163,43 @@ The app does **not** hard-code a repo path. At each start/retry it resolves a `S
 
 Config lives at `~/Library/Application Support/LocalDictation/config.json` and is read **at startup** — edits require an **app relaunch**.
 
-A minimal override is enough (port and model default):
+A minimal override is enough (port and model default for Voxtral):
 
 ```json
 {"serverExecutable": "/abs/path/to/serve"}
 ```
 
-- Path must be absolute after `~` expansion and must be executable.
-- Optional keys: `port` (default `8471`), `model` (HF id). An invalid `port` is reported rather than silently defaulted.
-- `idleUnloadMinutes` (default `10`): minutes of inactivity with no dictation request/session before the speech runtime is unloaded to free the ~4 GB model. Positive fractional values are allowed (useful for testing). `0` disables unload and keeps the runtime always resident. Negative values are invalid and fall back to `10` with a diagnostic. After unload the menu shows **Dormant** / Server stopped; the next mic-key or toggle start shows **Warming up…** until `/health` and the WebSocket are ready again.
+**Parakeet TDT v3 CoreML** (in-process sliding-window partials, no Python ASR):
+
+```json
+{
+  "provider": "parakeet",
+  "parakeetModelPath": "~/parakeet-tdt-0.6b-v3-coreml",
+  "parakeetChunkSeconds": 0.75
+}
+```
+
+`parakeetChunkSeconds` is the sliding-window **center stride** (FluidAudio default is ~11 s for long-form; we use a short dictation window so partials appear while you hold). Smaller → more frequent partials; first update after roughly `chunk + ~0.3 s` of audio.
+
+**Parakeet MLX** (Python server, streaming):
+
+```json
+{
+  "provider": "parakeet-mlx",
+  "parakeetMlxModelPath": "~/parakeet-tdt-0.6b-v3",
+  "parakeetChunkSeconds": 0.5
+}
+```
+
+Or use a Hugging Face id instead of a local path: `"model": "mlx-community/parakeet-tdt-0.6b-v3"`.
+
+- `provider` (default `voxtral`): `voxtral`, `parakeet` (CoreML), or `parakeet-mlx`. Menu **Speech Provider** switches live.
+- **Python providers** (`voxtral`, `parakeet-mlx`): `serverExecutable`, `port` (default `8471`), `model` (HF id). An invalid `port` is reported rather than silently defaulted. For Parakeet MLX: `cd server && uv sync --group parakeet --python 3.12` (Python 3.12 recommended; 3.14 is not supported).
+- **CoreML keys:** `parakeetModelPath` — optional staged [FluidInference/parakeet-tdt-0.6b-v3-coreml](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml) folder. Auto-discovers `~/parakeet-tdt-0.6b-v3-coreml` or FluidAudio cache. Menu: **Choose Parakeet CoreML Model Folder…**
+- **MLX keys:** `parakeetMlxModelPath` — optional staged [mlx-community/parakeet-tdt-0.6b-v3](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3) folder (e.g. `~/parakeet-tdt-0.6b-v3`). Passed as `--model` so loads stay offline. Auto-discovers that home path; otherwise falls back to `model` / the default HF id. Menu: **Choose Parakeet MLX Model Folder…**
+- **`parakeetChunkSeconds`** (default `0.75`): CoreML sliding-window stride / MLX `transcribe_stream` step. Lower = snappier partials.
+- CoreML TDT uses overlapping windows (not EOU). MLX uses true streaming and is often the lower-latency partials path if you have the Python env set up. Hold-to-talk and terminal buffer mode still apply.
+- `idleUnloadMinutes` (default `10`): minutes of inactivity before unload. `0` keeps the runtime always resident.
 
 ## Server status, errors, and recovery
 
@@ -249,5 +286,7 @@ This project builds on MIT-licensed work:
 - **[voxmlx fork](https://github.com/T0mSIlver/voxmlx)** (MIT) — FastAPI WebSocket server, streaming session, watchdog, encoder-cache bound patterns adapted into `server/`
 - **[localvoxtral](https://github.com/T0mSIlver/localvoxtral)** (MIT) — Swift patterns for insertion, terminal detection, audio capture, and process supervision (reimplemented, not copied wholesale)
 - **[CursorBounds](https://github.com/Aeastr/CursorBounds)** (MIT) — caret-bounds / AX fallback approach (vendored as approach, not as a dependency)
+- **[FluidAudio](https://github.com/FluidInference/FluidAudio)** (Apache 2.0) — optional Parakeet TDT CoreML ASR path
+- **[Parakeet TDT 0.6B v3 CoreML](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml)** (Apache 2.0) — FluidInference conversion of NVIDIA Parakeet
 
 See upstream repositories for full license text.

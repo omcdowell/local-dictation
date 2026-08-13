@@ -104,6 +104,88 @@ struct AppConfigTests {
         #expect(config.websocketURL.absoluteString == "ws://127.0.0.1:9001/v1/realtime")
     }
 
+    @Test("Default provider is voxtral")
+    func defaultProviderIsVoxtral() throws {
+        let json = #"{}"#
+        let config = try AppConfig.decode(Data(json.utf8))
+        #expect(config.provider == .voxtral)
+        #expect(config.parakeetModelPath == nil)
+    }
+
+    @Test("Parakeet provider and model path decode")
+    func parakeetProviderAndModelPathDecode() throws {
+        let json = #"{"provider": "parakeet", "parakeetModelPath": "~/parakeet-tdt-0.6b-v3-coreml"}"#
+        let config = try AppConfig.decode(Data(json.utf8))
+        #expect(config.provider == .parakeet)
+        #expect(config.parakeetModelPath == "~/parakeet-tdt-0.6b-v3-coreml")
+        #expect(config.parakeetChunkSeconds == AppConfig.defaultParakeetChunkSeconds)
+        #expect(config.serverBackendFlag == nil)
+    }
+
+    @Test("Parakeet MLX provider resolves server flags")
+    func parakeetMlxProviderResolvesServerFlags() throws {
+        // Explicit HF id via `model` — no local path — so discovery cannot override.
+        let json = #"{"provider": "parakeet-mlx", "model": "mlx-community/parakeet-tdt-0.6b-v3", "parakeetChunkSeconds": 0.75}"#
+        let config = try AppConfig.decode(Data(json.utf8))
+        #expect(config.provider == .parakeetMlx)
+        #expect(config.serverBackendFlag == "parakeet-mlx")
+        #expect(config.resolvedServerModel == "mlx-community/parakeet-tdt-0.6b-v3")
+        #expect(config.parakeetChunkSeconds == 0.75)
+        #expect(config.provider.usesPythonServer)
+    }
+
+    @Test("Parakeet MLX local path wins over HF model id")
+    func parakeetMlxLocalPathWinsOverModelId() throws {
+        let json = """
+        {"provider": "parakeet-mlx", "model": "mlx-community/ignored", "parakeetMlxModelPath": "~/parakeet-tdt-0.6b-v3"}
+        """
+        let config = try AppConfig.decode(Data(json.utf8))
+        #expect(config.parakeetMlxModelPath == "~/parakeet-tdt-0.6b-v3")
+        let resolved = config.resolvedServerModel ?? ""
+        #expect(resolved.hasSuffix("/parakeet-tdt-0.6b-v3") || resolved.contains("parakeet-tdt-0.6b-v3"))
+        #expect(!resolved.hasPrefix("mlx-community/"))
+    }
+
+    @Test("looksLikeParakeetMlxModelDirectory rejects CoreML trees")
+    func looksLikeParakeetMlxRejectsCoreML() throws {
+        try TestSupport.withTemporaryDirectory { root in
+            // Fake CoreML-looking tree
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent("Encoder.mlmodelc"),
+                withIntermediateDirectories: true
+            )
+            try Data("{}".utf8).write(to: root.appendingPathComponent("config.json"))
+            #expect(!AppConfig.looksLikeParakeetMlxModelDirectory(root))
+
+            // Fake MLX tree
+            let mlx = root.appendingPathComponent("mlx", isDirectory: true)
+            try FileManager.default.createDirectory(at: mlx, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: mlx.appendingPathComponent("config.json"))
+            try Data("x".utf8).write(to: mlx.appendingPathComponent("tokenizer.model"))
+            #expect(AppConfig.looksLikeParakeetMlxModelDirectory(mlx))
+        }
+    }
+
+    @Test("Provider is case-insensitive")
+    func providerIsCaseInsensitive() throws {
+        let json = #"{"provider": "Parakeet"}"#
+        let config = try AppConfig.decode(Data(json.utf8))
+        #expect(config.provider == .parakeet)
+    }
+
+    @Test("Invalid provider is actionable")
+    func invalidProviderIsActionable() {
+        do {
+            _ = try AppConfig.decode(Data(#"{"provider": "whisper"}"#.utf8))
+            Issue.record("Expected invalid provider to throw")
+        } catch let error as AppConfig.ValidationError {
+            #expect(error == .invalidProvider("whisper"))
+            #expect(error.description.contains("voxtral"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     @Test("resolveServerLaunchCommand uses override")
     func resolveServerLaunchCommandUsesOverride() throws {
         try TestSupport.withTemporaryDirectory { root in

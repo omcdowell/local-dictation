@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "local-dictation-server"
 version = "0.1.1"
 description = "Local Voxtral realtime ASR WebSocket server for local-dictation"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "voxmlx",
     "fastapi",
@@ -22,11 +22,22 @@ packages = ["src/local_dictation_server"]
 
 [tool.uv]
 package = true
+# librosa/numba resolution can pick ancient pins. numba 0.66+ needs llvmlite
+# >=0.49; on Python 3.13 only 0.49.0rc1 wheels exist (stable 0.49 not on PyPI yet).
+# Mismatch (e.g. numba 0.67 + llvmlite 0.48) crashes model load → app restart loop.
+override-dependencies = [
+    "numba>=0.60",
+    "llvmlite>=0.49.0rc1",
+]
 
 [dependency-groups]
 dev = [
     "ruff",
     "ty",
+]
+# Optional ASR backend: `uv sync --group parakeet --python 3.12`.
+parakeet = [
+    "parakeet-mlx",
 ]
 
 [tool.ruff]
